@@ -19,28 +19,20 @@ static func set_instance(inst: WizardWatcher) -> void:
 var _model: WizardModel
 var _selection_connected: bool = false
 var _filesystem_connected: bool = false
-var _rename_hooks: Array = []  # [{node, callable}] for clean disconnect
+var _rename_hooks: Array = []  # [{node, callable, target}] for clean disconnect + display
+
+signal watches_changed
 
 func setup(model: WizardModel) -> void:
 	_model = model
 
 func clear_all() -> void:
-	var sel := EditorInterface.get_selection()
-	if _selection_connected and sel.selection_changed.is_connected(Callable(self, "_on_selection_changed")):
-		sel.selection_changed.disconnect(Callable(self, "_on_selection_changed"))
-	_selection_connected = false
-
-	for hook in _rename_hooks:
-		var node = hook["node"]
-		var callable = hook["callable"]
-		if is_instance_valid(node) and node.renamed.is_connected(callable):
-			node.renamed.disconnect(callable)
+	_disconnect_selection()
+	for hook in _rename_hooks.duplicate():
+		_disconnect_rename_hook(hook)
 	_rename_hooks.clear()
-
-	var efs := EditorInterface.get_resource_filesystem()
-	if _filesystem_connected and efs.filesystem_changed.is_connected(Callable(self, "_on_filesystem_changed")):
-		efs.filesystem_changed.disconnect(Callable(self, "_on_filesystem_changed"))
-	_filesystem_connected = false
+	_disconnect_filesystem()
+	watches_changed.emit()
 
 ## Arms every unchecked step: checks for an already-satisfied state, and
 ## connects the live watch for kinds that need one.
@@ -56,6 +48,46 @@ func ping_step(index: int) -> void:
 	if index < 0 or index >= steps.size():
 		return
 	_arm_step(index, steps[index])
+
+## Human-readable list of currently-connected watches, in the same order
+## clear_watch(index) expects: selection watch, then filesystem watch, then
+## one entry per armed rename hook.
+func list_watches() -> Array[String]:
+	var out: Array[String] = []
+	if _selection_connected:
+		out.append("Selection watch (scene-select steps)")
+	if _filesystem_connected:
+		out.append("Filesystem watch (resource-create steps)")
+	for hook in _rename_hooks:
+		var node = hook["node"]
+		var target: String = hook.get("target", "")
+		var node_name: String = String(node.name) if is_instance_valid(node) else "(freed node)"
+		if target.is_empty():
+			out.append("Rename watch: %s" % node_name)
+		else:
+			out.append("Rename watch: %s -> %s" % [node_name, target])
+	return out
+
+## Clears one watch by its index into list_watches()'s array.
+func clear_watch(index: int) -> void:
+	var i := index
+	if _selection_connected:
+		if i == 0:
+			_disconnect_selection()
+			watches_changed.emit()
+			return
+		i -= 1
+	if _filesystem_connected:
+		if i == 0:
+			_disconnect_filesystem()
+			watches_changed.emit()
+			return
+		i -= 1
+	if i >= 0 and i < _rename_hooks.size():
+		var hook = _rename_hooks[i]
+		_disconnect_rename_hook(hook)
+		_rename_hooks.remove_at(i)
+		watches_changed.emit()
 
 func _arm_step(index: int, step: Dictionary) -> void:
 	if step.get("checked", false):
@@ -76,12 +108,32 @@ func _ensure_selection_watch() -> void:
 		return
 	EditorInterface.get_selection().selection_changed.connect(Callable(self, "_on_selection_changed"))
 	_selection_connected = true
+	watches_changed.emit()
 
 func _ensure_filesystem_watch() -> void:
 	if _filesystem_connected:
 		return
 	EditorInterface.get_resource_filesystem().filesystem_changed.connect(Callable(self, "_on_filesystem_changed"))
 	_filesystem_connected = true
+	watches_changed.emit()
+
+func _disconnect_selection() -> void:
+	var sel := EditorInterface.get_selection()
+	if _selection_connected and sel.selection_changed.is_connected(Callable(self, "_on_selection_changed")):
+		sel.selection_changed.disconnect(Callable(self, "_on_selection_changed"))
+	_selection_connected = false
+
+func _disconnect_filesystem() -> void:
+	var efs := EditorInterface.get_resource_filesystem()
+	if _filesystem_connected and efs.filesystem_changed.is_connected(Callable(self, "_on_filesystem_changed")):
+		efs.filesystem_changed.disconnect(Callable(self, "_on_filesystem_changed"))
+	_filesystem_connected = false
+
+func _disconnect_rename_hook(hook: Dictionary) -> void:
+	var node = hook["node"]
+	var callable = hook["callable"]
+	if is_instance_valid(node) and node.renamed.is_connected(callable):
+		node.renamed.disconnect(callable)
 
 func _arm_scene_rename(index: int, step: Dictionary) -> void:
 	var target: String = step.get("target_value", "")
@@ -94,7 +146,8 @@ func _arm_scene_rename(index: int, step: Dictionary) -> void:
 		return
 	var callable = Callable(self, "_on_node_renamed").bind(index, node, target)
 	node.renamed.connect(callable)
-	_rename_hooks.append({"node": node, "callable": callable})
+	_rename_hooks.append({"node": node, "callable": callable, "target": target})
+	watches_changed.emit()
 
 func _on_node_renamed(index: int, node: Node, target: String) -> void:
 	if target.is_empty() or node.name == target:

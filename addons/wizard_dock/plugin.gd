@@ -9,10 +9,13 @@ extends EditorPlugin
 ## Each checklist row shows two checkboxes: an auto-verified one (disabled,
 ## ticked by WizardWatcher when a watched signal fires) and a manual one
 ## (always user-editable, orange, for steps that can't be auto-verified —
-## the user ticks it themselves to say "I believe I've done this").
+## the user ticks it themselves to say "I believe I've done this"). Below
+## the checklist, an "Active Watches" section lists whatever live signal
+## connections WizardWatcher currently holds, each individually clearable.
 
 const WizardModelScript := preload("res://addons/wizard_dock/wizard_model.gd")
 const WizardWatcherScript := preload("res://addons/wizard_dock/wizard_watcher.gd")
+const WizardHighlighterScript := preload("res://addons/wizard_dock/wizard_highlighter.gd")
 
 const SOURCE_PATH := "res://addons/wizard_dock/plugin.cfg"
 const HANDLER_PATH := "res://addons/wizard_dock/wizard_tools_handler.gd"
@@ -20,8 +23,10 @@ const MANUAL_COLOR := Color(1.0, 0.667, 0.0, 1.0)  # #ffaa00
 
 var _model: WizardModel
 var _watcher: WizardWatcher
+var _highlighter: WizardHighlighter
 var _root: Control
 var _steps_container: VBoxContainer
+var _watches_container: VBoxContainer
 var _registered: bool = false
 
 func _enter_tree() -> void:
@@ -32,10 +37,16 @@ func _enter_tree() -> void:
 	_watcher.setup(_model)
 	WizardWatcher.set_instance(_watcher)
 
+	_highlighter = WizardHighlighterScript.new()
+	_highlighter.setup(get_tree())
+	WizardHighlighter.set_instance(_highlighter)
+
 	_model.steps_changed.connect(_refresh_ui)
+	_watcher.watches_changed.connect(_refresh_watches_ui)
 
 	_build_dock()
 	_refresh_ui()
+	_refresh_watches_ui()
 	_try_register_tools()
 
 
@@ -47,6 +58,11 @@ func _exit_tree() -> void:
 	if _watcher != null:
 		_watcher.clear_all()
 	WizardWatcher.set_instance(null)
+
+	if _highlighter != null:
+		_highlighter.clear()
+	WizardHighlighter.set_instance(null)
+
 	WizardModel.set_instance(null)
 
 	if _root != null:
@@ -106,7 +122,28 @@ func _try_register_tools() -> void:
 	get_spec.requires_writable = false
 	get_spec.undoable = false
 
-	var specs: Array[McpCustomToolSpec] = [set_spec, get_spec]
+	var highlight_spec := McpCustomToolSpec.new()
+	highlight_spec.name = "wizard_highlight_step"
+	highlight_spec.description = ("Box the given checklist step's on-screen target with a pulsing orange " +
+		"overlay so the user can see where to look. Tries a Scene Tree row (scene-select/scene-rename " +
+		"steps) first, falling back to any editor UI control whose name/text/tooltip matches search_text " +
+		"(dock buttons, tabs, checkboxes). Clears automatically after a few seconds. Returns 'highlighted': " +
+		"false if nothing matched.")
+	highlight_spec.params_schema = {
+		"type": "object",
+		"properties": {
+			"index": {"type": "integer", "description": "0-based index into the current checklist (see wizard_get_steps)."},
+		},
+		"required": ["index"],
+	}
+	highlight_spec.script_path = HANDLER_PATH
+	highlight_spec.method = &"highlight_step"
+	highlight_spec.source_path = SOURCE_PATH
+	highlight_spec.source = "Wizard"
+	highlight_spec.requires_writable = false
+	highlight_spec.undoable = false
+
+	var specs: Array[McpCustomToolSpec] = [set_spec, get_spec, highlight_spec]
 	_registered = registry.batch_register(specs)
 
 
@@ -148,6 +185,20 @@ func _build_dock() -> void:
 		_watcher.clear_all()
 	)
 	inner.add_child(clear_button)
+
+	inner.add_child(HSeparator.new())
+
+	var watches_label := Label.new()
+	watches_label.text = "Active Watches"
+	inner.add_child(watches_label)
+
+	_watches_container = VBoxContainer.new()
+	inner.add_child(_watches_container)
+
+	var clear_watches_button := Button.new()
+	clear_watches_button.text = "Clear All Watches"
+	clear_watches_button.pressed.connect(func(): _watcher.clear_all())
+	inner.add_child(clear_watches_button)
 
 	_root = root
 	add_control_to_dock(DOCK_SLOT_RIGHT_BL, root)
@@ -191,9 +242,45 @@ func _refresh_ui() -> void:
 		ping_button.pressed.connect(func(): _watcher.ping_step(idx))
 		row.add_child(ping_button)
 
+		var highlight_button := Button.new()
+		highlight_button.text = "Highlight"
+		highlight_button.tooltip_text = "Box this step's target on-screen for a few seconds (Scene Tree row, or a matching dock control)."
+		highlight_button.pressed.connect(func(): _highlighter.highlight_step(step))
+		row.add_child(highlight_button)
+
 		_steps_container.add_child(row)
 
 	if steps.is_empty():
 		var empty_label := Label.new()
 		empty_label.text = "(no active checklist)"
 		_steps_container.add_child(empty_label)
+
+
+func _refresh_watches_ui() -> void:
+	if _watches_container == null:
+		return
+	for child in _watches_container.get_children():
+		child.queue_free()
+
+	var watches := _watcher.list_watches()
+	for i in range(watches.size()):
+		var row := HBoxContainer.new()
+
+		var label := Label.new()
+		label.text = watches[i]
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		label.clip_text = true
+		row.add_child(label)
+
+		var clear_button := Button.new()
+		clear_button.text = "Clear"
+		var idx := i
+		clear_button.pressed.connect(func(): _watcher.clear_watch(idx))
+		row.add_child(clear_button)
+
+		_watches_container.add_child(row)
+
+	if watches.is_empty():
+		var empty_label := Label.new()
+		empty_label.text = "(none)"
+		_watches_container.add_child(empty_label)

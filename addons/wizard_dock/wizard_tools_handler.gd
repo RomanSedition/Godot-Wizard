@@ -55,3 +55,22 @@ func get_steps(_params: Dictionary, _ctx) -> Dictionary:
 	if model == null:
 		return {"data": {"steps": []}}
 	return {"data": {"steps": model.get_steps_snapshot()}}
+
+
+## Boxes the given step's target on-screen (Scene Tree row, or a generic
+## dock control matched by name/text/tooltip) with a pulsing orange overlay
+## that auto-clears after a few seconds. Returns whether a target was found.
+func highlight_step(params: Dictionary, _ctx) -> Dictionary:
+	var index: int = params.get("index", -1)
+	var model := WizardModel.get_instance()
+	if model == null:
+		return {"error": "Wizard model not ready (plugin still initializing?)."}
+	var steps := model.get_steps_snapshot()
+	if index < 0 or index >= steps.size():
+		return {"error": "index out of range (checklist has %d step(s))." % steps.size()}
+
+	var highlighter := WizardHighlighter.get_instance()
+	if highlighter == null:
+		return {"error": "Highlighter not ready."}
+	var found := highlighter.highlight_step(steps[index])
+	return {"data": {"highlighted": found, "label": steps[index].get("label", "")}}
